@@ -398,6 +398,9 @@ function ConvertTo-AppParameters {
 # Check to see if the node has already been prepared, if it has just exit early.
 if ($env:KOPS_NODE_STATE -eq "ready") { exit }
 
+# Disable windows defender (this should be removed in the image)
+Set-MpPreference -DisableRealtimeMonitoring $true
+
 # Pull down our instance's tags.
 $InstanceId = (wget "http://$script:AWSSelfServiceUri/meta-data/instance-id" -UseBasicParsing).Content
 $Ec2Tags = (Get-EC2Tag -Filter @{ Name = "resource-id"; Values = "$InstanceId" })

@@ -4,7 +4,7 @@
 # will be explained down.
 param(
     [parameter(Mandatory = $false)] 
-    [switch] $AutoGenerateWindowsTaints = $true,
+    [switch]$AutoGenerateWindowsTaints,
 
     [parameter(Mandatory = $true)]
     [string]$KubeClusterInternalApi

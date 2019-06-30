@@ -488,7 +488,7 @@ Read-S3Object `
 Install-AwsKubernetesFlannel -InstallationDirectory $KubernetesDirectory
 Install-AwsKubernetesNode -KubernetesVersion $KubernetesVersion -InstallationDirectory $KubernetesDirectory
 Install-DockerImages
-# Install-NSSM -InstallationDirectory $KubernetesDirectory
+Install-NSSM -InstallationDirectory $KubernetesDirectory
 
 # Wait for all installation jobs to finish.
 Get-Job | Wait-Job

@@ -485,7 +485,7 @@ Read-S3Object `
 Install-AwsKubernetesFlannel -InstallationDirectory $KubernetesDirectory
 Install-AwsKubernetesNode -KubernetesVersion $KubernetesVersion -InstallationDirectory $KubernetesDirectory
 Install-DockerImages
-Install-NSSM -InstallationDirectory $KubernetesDirectory
+# Install-NSSM -InstallationDirectory $KubernetesDirectory
 
 # Wait for all installation jobs to finish.
 Get-Job | Wait-Job
@@ -605,21 +605,24 @@ while ($? -eq $false) {
 Update-NetConfigurationFile
 Update-CniConfigurationFile
 
-$Services = @("flanneld", "kubelet", "kube-proxy")
-foreach ($Service in $Services) {
-    # Install our base services.
-    nssm install $Service "$KubernetesDirectory/bin/$Service"
+#$Services = @("flanneld", "kubelet", "kube-proxy")
+#foreach ($Service in $Services) {
+#    # Install our base services.
+#    nssm install $Service "$KubernetesDirectory/bin/$Service"
+#
+#    # Setup logging for each service.
+#    nssm set $Service AppStderr (Join-Path -Path "c:/" -ChildPath "$Service.log")
+#}
+#
+## Set service dependencies.
+#nssm set kube-proxy DependOnService kubelet flanneld
+#
+## Determine environment for the services.
+#nssm set flanneld AppEnvironmentExtra NODE_NAME=$env:NODE_NAME
+#nssm set kube-proxy AppEnvironmentExtra KUBE_NETWORK=$env:KUBE_NETWORK
 
-    # Setup logging for each service.
-    nssm set $Service AppStderr (Join-Path -Path "c:/" -ChildPath "$Service.log")
-}
-
-# Set service dependencies.
-nssm set kube-proxy DependOnService kubelet flanneld
-
-# Determine environment for the services.
-nssm set flanneld AppEnvironmentExtra NODE_NAME=$env:NODE_NAME
-nssm set kube-proxy AppEnvironmentExtra KUBE_NETWORK=$env:KUBE_NETWORK
+[System.Environment]::SetEnvironmentVariable('NODE_NAME', $env:NODE_NAME, [System.EnvironmentVariableTarget]::Machine)
+[System.Environment]::SetEnvironmentVariable('KUBE_NETWORK', $env:KUBE_NETWORK, [System.EnvironmentVariableTarget]::Machine)
 
 # Determine our base arguments for the services.
 $KubeletArguments = @{
@@ -669,15 +672,21 @@ $KubeProxyArguments = @{
     "proxy-mode"        = "kernelspace";
     "source-vip"        = "$null"
 }
-nssm set kubelet AppParameters (ConvertTo-AppParameters -AppParameters $KubeletArguments)
-nssm set flanneld AppParameters (ConvertTo-AppParameters -AppParameters $FlannelArguments)
-nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+#nssm set kubelet AppParameters (ConvertTo-AppParameters -AppParameters $KubeletArguments)
+#nssm set flanneld AppParameters (ConvertTo-AppParameters -AppParameters $FlannelArguments)
+#nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+
+# Install kubelet service
+New-Service -Name kubelet -BinaryPathName $("$KubernetesDirectory/bin/kubelet.exe " + (ConvertTo-AppParameters -AppParameters $KubeletArguments)) -DisplayName Kubelet -StartupType Automatic
+New-Service -Name flanneld -BinaryPathName $("$KubernetesDirectory/bin/flanneld.exe " + (ConvertTo-AppParameters -AppParameters $FlannelArguments)) -DisplayName Flanneld -StartupType Automatic
 
 # Start kubelet so that we register the node, but it won't be schedulable yet.
-nssm start kubelet
+#nssm start kubelet
+Start-Service -Name kubelet
 
 # Start flannel so we can get the source VIP needed for kube-proxy.
-nssm start flanneld
+#nssm start flanneld
+Start-Service -Name flanneld
 
 # We need to wait for a few seconds for flannel to start before we can get our source VIP.
 # Ideally we'd have a way to check without having to poll, but as far as I can tell there's no way to tell if flannel
@@ -691,11 +700,13 @@ while ($SourceVip -eq $null) {
 Write-Host "obtained source-VIP"
 
 $KubeProxyArguments.'source-vip' = "$SourceVip"
-nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+#nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+New-Service -Name kube-proxy -BinaryPathName $("$KubernetesDirectory/bin/kube-proxy.exe " + (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)) -DisplayName KubeProxy -StartupType Automatic -DependsOn @('kubelet', 'flanneld')
 
 # Clear the HNS policy list before starting kube-proxy.
 Get-HnsPolicyList | Remove-HnsPolicyList
-nssm start kube-proxy
+#nssm start kube-proxy
+Start-Service -Name 'kube-proxy'
 
 # Remove the NotReady taint so that pods can be scheduled.
 kubectl --kubeconfig="$KubernetesDirectory/kconfigs/kubelet.kcfg" taint nodes $env:NODE_NAME "node.kubernetes.io/NotReady-"

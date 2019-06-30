@@ -651,7 +651,8 @@ $KubeletArguments = @{
     "register-schedulable"         = "true";
     "register-with-taints"         = "$NodeTaints";
     "resolv-conf"                  = "";
-    "v"                            = "6"
+    "v"                            = "6";
+    "log-dir"                       = $KubernetesDirectory;
 }
 
 $FlannelArguments = @{

@@ -11,6 +11,7 @@ param(
 )
 
 Start-Transcript -Path c:\nodeup.log -Force -Append
+Install-Module powershell-yaml -Force
 
 # Define some of our constants.
 $global:progressPreference = 'silentlyContinue'

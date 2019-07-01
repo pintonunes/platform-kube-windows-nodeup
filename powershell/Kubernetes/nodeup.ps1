@@ -10,6 +10,8 @@ param(
     [string]$KubeClusterInternalApi
 )
 
+Start-Transcript -Path c:\nodeup.log -Force -Append
+
 # Define some of our constants.
 $global:progressPreference = 'silentlyContinue'
 $AWSSelfServiceUri = "169.254.169.254/latest"

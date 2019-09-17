@@ -134,29 +134,29 @@ function Install-AwsKubernetesFlannel {
 }
 
 function Install-NSSM {
-    #param (
-    #    [parameter(Mandatory = $true)] $InstallationDirectory,
-    #    [parameter(Mandatory = $false)] $NssmVersion = "2.23",
-    #    [parameter(Mandatory = $false)] $DownloadDirectory = (Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "nssm")
-    #)
-#
-    #Start-Job -Name install-nssm -ScriptBlock {
-    #    $DownloadDirectory = $args[0]
-    #    $InstallationDirectory = $args[1]
-    #    $NssmVersion = $args[2]
-#
-    #    New-Item -ItemType directory -Path $DownloadDirectory
-#
-    #    wget "https://nssm.cc/release/nssm-$NssmVersion.zip" -OutFile "$DownloadDirectory/nssm.zip"
-    #    Expand-Archive "$DownloadDirectory/nssm.zip" -DestinationPath "$DownloadDirectory/"
-#
-    #    Move-Item -Path "$DownloadDirectory/nssm-$NssmVersion/win64/nssm.exe" -Destination "$InstallationDirectory/bin/nssm.exe" -Force
-#
-    #    Remove-Item -Path $DownloadDirectory -Recurse
-    #} -ArgumentList $DownloadDirectory, $InstallationDirectory, $NssmVersion
+    param (
+        [parameter(Mandatory = $true)] $InstallationDirectory,
+        [parameter(Mandatory = $false)] $NssmVersion = "2.23",
+        [parameter(Mandatory = $false)] $DownloadDirectory = (Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "nssm")
+    )
 
-    Install-PackageProvider ChocolateyGet -Force
-    Install-Package nssm -ProviderName ChocolateyGet -Force
+    Start-Job -Name install-nssm -ScriptBlock {
+        $DownloadDirectory = $args[0]
+        $InstallationDirectory = $args[1]
+        $NssmVersion = $args[2]
+
+        New-Item -ItemType directory -Path $DownloadDirectory
+
+        wget "https://nssm.cc/release/nssm-$NssmVersion.zip" -OutFile "$DownloadDirectory/nssm.zip"
+        Expand-Archive "$DownloadDirectory/nssm.zip" -DestinationPath "$DownloadDirectory/"
+
+        Move-Item -Path "$DownloadDirectory/nssm-$NssmVersion/win64/nssm.exe" -Destination "$InstallationDirectory/bin/nssm.exe" -Force
+
+        Remove-Item -Path $DownloadDirectory -Recurse
+    } -ArgumentList $DownloadDirectory, $InstallationDirectory, $NssmVersion
+
+    #Install-PackageProvider ChocolateyGet -Force
+    #Install-Package nssm -ProviderName ChocolateyGet -Force
 }
 
 function New-KubernetesConfigurations {

@@ -629,7 +629,6 @@ nssm set kube-proxy AppEnvironmentExtra KUBE_NETWORK=$env:KUBE_NETWORK
 
 # Determine our base arguments for the services.
 $KubeletArguments = @{
-    "allow-privileged"             = "true";
     "anonymous-auth"               = "false";
     "authorization-mode"           = "Webhook";
     "cgroups-per-qos"              = "false";
@@ -648,7 +647,6 @@ $KubeletArguments = @{
     "kubeconfig"                   = "$KubernetesDirectory/kconfigs/kubelet.kcfg";
     "network-plugin"               = "cni";
     "node-ip"                      = "$NetworkHostIpAddress";
-    "node-labels"                  = "$NodeLabels";
     "non-masquerade-cidr"          = "$env:KubeNonMasqueradeCidr";
     "pod-infra-container-image"    = "kubeletwin/pause";
     "register-schedulable"         = "true";

@@ -375,6 +375,8 @@ function PrepareNetwork()
     {
         Write-Output 'Creating External network'
         New-HNSNetwork -Type 'overlay' -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $((GetDefaultInterface).InterfaceAlias) -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) | Out-Null
+        Write-Output "Re-Adding the route to the meta-data AWS service"
+        route add 169.254.169.254 MASK 255.255.255.255 0.0.0.0 | Out-Null
     }
     else
     {

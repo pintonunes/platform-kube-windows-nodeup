@@ -344,9 +344,9 @@ function InstallBinaries()
     DownloadFile -Url "https://raw.githubusercontent.com/Microsoft/SDN/master/Kubernetes/windows/hns.psm1" -Destination "$installDir/hns.psm1"
 
     Write-Output 'Downloading NSSM service manager'
-    DownloadFile -Url "https://nssm.cc/release/nssm-2.23.zip" -Destination "$env:Temp\kops\nssm.zip"
-    Expand-Archive "$env:Temp\kops\nssm.zip" -DestinationPath "$env:Temp\kops" -Force
-    Copy-Item "$env:Temp\kops\nssm-2.23\win64\nssm.exe" -Destination $installDir -Force
+    DownloadFile -Url "https://globalcdn.nuget.org/packages/nssm.2.24.0.nupkg" -Destination "$env:Temp\kops\nssm.2.24.0.zip"
+    Expand-Archive "$env:Temp\kops\nssm.2.24.0.zip" -DestinationPath "$env:Temp\kops\nssm" -Force
+    Copy-Item "$env:Temp\kops\nssm\tools\win64\nssm.exe" -Destination $installDir -Force
 }
 
 function PrepareNetwork()

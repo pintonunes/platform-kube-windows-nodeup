@@ -232,6 +232,26 @@ function InstallNSSMService([string]$NSSMPath, [string]$Name, [string]$Path, [st
     }
 }
 
+function WaitForHost([string]$Hostname, [int]$TcpPort , [int]$waitTimeSeconds = 60)
+{
+    $startTime = Get-Date
+
+    while ($true)
+    {
+        $timeElapsed = $(Get-Date) - $startTime
+        if ($($timeElapsed).TotalSeconds -ge $waitTimeSeconds)
+        {
+            throw "Host $Hostname not reachable after $waitTimeSeconds seconds"
+        }
+        if ((Test-NetConnection -ComputerName $Hostname -Port $TcpPort -WarningAction SilentlyContinue).TcpTestSucceeded)
+        {
+            break;
+        }
+        Write-Output "Host $Hostname not reachable on port $TcpPort. Sleeping 5 seconds..."
+        Start-Sleep -Seconds 5
+    }
+}
+
 function WaitForNetwork([string]$NetworkName, [int]$waitTimeSeconds = 60)
 {
     $startTime = Get-Date
@@ -249,7 +269,7 @@ function WaitForNetwork([string]$NetworkName, [int]$waitTimeSeconds = 60)
             break;
         }
         Write-Output "Waiting for the Network ($NetworkName) to be created by flanneld"
-        Start-Sleep 5
+        Start-Sleep -Seconds 5
     }
 }
 
@@ -261,13 +281,13 @@ function GetSourceVip([string]$NetworkName, [string]$CniPath)
     $ipamConfig = @"
         {"cniVersion": "0.2.0", "name": "$NetworkName", "ipam":{"type":"host-local","ranges":[[{"subnet":"$subnet"}]],"dataDir":"/var/lib/cni/networks"}}
 "@
-    $env:CNI_COMMAND="ADD"
-    $env:CNI_CONTAINERID="dummy"
-    $env:CNI_NETNS="dummy"
-    $env:CNI_IFNAME="dummy"
-    $env:CNI_PATH=$CniPath #path to host-local.exe
+    $env:CNI_COMMAND = "ADD"
+    $env:CNI_CONTAINERID = "dummy"
+    $env:CNI_NETNS = "dummy"
+    $env:CNI_IFNAME = "dummy"
+    $env:CNI_PATH = $CniPath #path to host-local.exe
 
-    $sourceVip = ($ipamConfig |  & $CniPath\host-local.exe | ConvertFrom-Json).ip4.ip.Split("/")[0]
+    $sourceVip = ($ipamConfig | & $CniPath\host-local.exe | ConvertFrom-Json).ip4.ip.Split("/")[0]
 
     Remove-Item env:CNI_COMMAND
     Remove-Item env:CNI_CONTAINERID
@@ -371,16 +391,27 @@ function PrepareNetwork()
         Write-Output 'Firewall rule for kubelet already exists'
     }
 
+    Write-Output 'Creating External network'
     if ( -not (Get-HnsNetwork | Where-Object -FilterScript { $_.Name -eq 'External' }))
     {
-        Write-Output 'Creating External network'
         New-HNSNetwork -Type 'overlay' -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $((GetDefaultInterface).InterfaceAlias) -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) | Out-Null
-        Write-Output "Re-Adding the route to the meta-data AWS service"
-        route add 169.254.169.254 MASK 255.255.255.255 0.0.0.0 | Out-Null
+
+        Write-Output "Wait for the network to become available again"
+        WaitForHost -Hostname $kubeClusterInternalApi -TcpPort 443
     }
     else
     {
         Write-Output 'External network already exists... Skipping...'
+    }
+
+    Write-Output "Re-Adding route to the AWS meta-data service"
+    if (-not (Get-NetRoute -DestinationPrefix '169.254.169.254/32' -ErrorAction SilentlyContinue))
+    {
+        New-NetRoute -DestinationPrefix '169.254.169.254/32' -NextHop '0.0.0.0' -InterfaceAlias $((GetDefaultInterface).InterfaceAlias) | Out-Null
+    }
+    else
+    {
+        Write-Output "Route already exists... Skipping..."
     }
 }
 

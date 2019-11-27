@@ -1,317 +1,177 @@
-# nodeup.ps1
-# This PowerShell script is to be run on startup of a Windows node managed via a kops InstanceGroup resource.
-# There are a few pre-requisites in order for this script to work, as well as a few "best practices", all of which
-# will be explained down.
-param(
-    [parameter(Mandatory = $false)] 
-    [switch]$AutoGenerateWindowsTaints,
-
-    [parameter(Mandatory = $true)]
-    [string]$KubeClusterInternalApi
+[CmdletBinding()]
+param (
+    [parameter()]
+    [string]$AWSRegion = 'eu-west-1'
 )
 
-Start-Transcript -Path c:\nodeup.log -Force -Append
-Install-Module powershell-yaml -Force
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
-# Define some of our constants.
-$global:progressPreference = 'silentlyContinue'
-$AWSSelfServiceUri = "169.254.169.254/latest"
-$KubernetesDirectory = "c:/k"
-$KopsConfigBaseRegex = "^ConfigBase: s3://(?<bucket>[^/]+)/(?<prefix>.+)$"
+# Constants
+$script:installDir = "$env:ALLUSERSPROFILE\Kubernetes"
 
-########################################################################################################################
-# Conveinence Functions
-########################################################################################################################
-function Get-AwsTag($TagName) { return ($script:Ec2Tags | Where-Object { $_.Key -eq "$TagName" }) }
-
-########################################################################################################################
-# Installation Functions
-########################################################################################################################
-function Install-DockerImages {
-    param (
-        [parameter(Mandatory = $false)] $WindowsVersion = $script:ComputerInfo.WindowsVersion,
-        [parameter(Mandatory = $false)] $WithServerCore = $false
-    )
-
-    Start-Job -Name install-docker -ScriptBlock {
-        $WindowsVersion = $args[0]
-        $WithServerCore = $args[1]
-
-        # Pull ready-made Windows containers of the given Windows version.
-        docker pull "mcr.microsoft.com/windows/nanoserver:$WindowsVersion"
-
-        # Tag the docker images.
-        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion" windows/nanoserver:latest
-        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion" microsoft/nanoserver:latest
-
-        # Build our infrastructure image.
-        $BuildDir = Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "docker"
-        New-Item -Path $BuildDir -ItemType directory
-        $DockerfileContents = "FROM mcr.microsoft.com/windows/nanoserver:$WindowsVersion`nCMD cmd /c ping -t localhost"
-    
-        Set-Content -Path $BuildDir/Dockerfile -Value $DockerfileContents
-        docker build -t kubeletwin/pause -f $BuildDir/Dockerfile $BuildDir
-
-        # Pull the servercore image if we're instructed to.
-        if ($WithServerCore) {
-            docker pull "mcr.microsoft.com/windows/servercore:$WindowsVersion"
-            docker tag "mcr.microsoft.com/windows/servercore:$WindowsVersion" windows/servercore:latest
-            docker tag "mcr.microsoft.com/windows/servercore:$WindowsVersion" microsoft/servercore:latest
-        }
-
-        Remove-Item -Path $BuildDir -Recurse
-    } -ArgumentList $WindowsVersion, $WithServerCore
-}
-
-function Install-AwsKubernetesNode {
-    param (
-        [parameter(Mandatory = $true)] $KubernetesVersion,
-        [parameter(Mandatory = $true)] $InstallationDirectory,
-        [parameter(Mandatory = $false)] $DownloadDirectory = (Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "knode")
-    )
-
-    Start-Job -Name install-knode {
-        $KubernetesVersion = $args[0]
-        $InstallationDirectory = $args[1]
-        $DownloadDirectory = $args[2]
-
-        New-Item -ItemType directory -Path $DownloadDirectory
-
-        # Download Kubernetes Node Services
-        wget "https://dl.k8s.io/v$KubernetesVersion/kubernetes-node-windows-amd64.tar.gz" `
-            -OutFile "$DownloadDirectory/knode.tar.gz"
-        tar -xzvf "$DownloadDirectory/knode.tar.gz" -C $DownloadDirectory
-
-        # Install Kubernetes Binaries
-        Move-Item -Path "$DownloadDirectory/kubernetes/node/bin/*.exe" -Destination "$InstallationDirectory/bin/"
-
-        Remove-Item -Path $DownloadDirectory -Recurse
-    } -ArgumentList $KubernetesVersion, $InstallationDirectory, $DownloadDirectory
-}
-
-function Install-AwsKubernetesFlannel {
-    param (
-        [parameter(Mandatory = $true)] $InstallationDirectory,
-        [parameter(Mandatory = $false)] $FlanneldVersion = "0.11.0",
-        [parameter(Mandatory = $false)] $DownloadBranch = "master",
-        [parameter(Mandatory = $false)] $DownloadDirectory = (Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "flannel")
-    )
-
-    Start-Job -Name install-flannel -ScriptBlock {
-        $DownloadDirectory = $args[0]
-        $InstallationDirectory = $args[1]
-        $DownloadBranch = $args[2]
-        $FlanneldVersion = $args[3]
-        $KubeClusterCidr = $args[4]
-
-        New-Item -Path $DownloadDirectory -ItemType "directory"
-
-        $GitHubMicrosoftSDNRepo = "github.com/Microsoft/SDN"
-        $GitHubFlannelRepo = "github.com/coreos/flannel"
-
-        # Download HNS Powershell module.
-        wget "https://$GitHubMicrosoftSDNRepo/raw/$DownloadBranch/Kubernetes/windows/hns.psm1" `
-            -OutFile "$InstallationDirectory/hns.psm1"
-
-        # Install flanneld executable.
-        wget "https://$GitHubFlannelRepo/releases/download/v$FlanneldVersion/flanneld.exe" `
-            -OutFile "$InstallationDirectory/bin/flanneld.exe"
-
-        # Install CNI executables.
-        New-Item -Path "$InstallationDirectory/cni" -ItemType "directory"
-        wget "https://$GitHubMicrosoftSDNRepo/raw/$DownloadBranch/Kubernetes/flannel/l2bridge/cni/host-local.exe" `
-            -OutFile "$InstallationDirectory/cni/host-local.exe"
-        wget "https://$GitHubMicrosoftSDNRepo/raw/$DownloadBranch/Kubernetes/flannel/l2bridge/cni/flannel.exe" `
-            -OutFile "$InstallationDirectory/cni/flannel.exe"
-        wget "https://$GitHubMicrosoftSDNRepo/raw/$DownloadBranch/Kubernetes/flannel/overlay/cni/win-overlay.exe" `
-            -OutFile "$InstallationDirectory/cni/win-overlay.exe"
-
-        # Create directories needed for runtime.
-        New-Item -Path "c:/etc/kube-flannel" -ItemType directory -ErrorAction Ignore
-        New-Item -Path "c:/run/flannel" -ItemType directory -ErrorAction Ignore
-        Remove-Item -Path $DownloadDirectory -Recurse
-    } -ArgumentList $DownloadDirectory, $InstallationDirectory, $DownloadBranch, $FlanneldVersion
-}
-
-function Install-NSSM {
-    param (
-        [parameter(Mandatory = $true)] $InstallationDirectory,
-        [parameter(Mandatory = $false)] $NssmVersion = "2.23",
-        [parameter(Mandatory = $false)] $DownloadDirectory = (Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "nssm")
-    )
-
-    Start-Job -Name install-nssm -ScriptBlock {
-        $DownloadDirectory = $args[0]
-        $InstallationDirectory = $args[1]
-        $NssmVersion = $args[2]
-
-        New-Item -ItemType directory -Path $DownloadDirectory
-
-        wget "https://nssm.cc/release/nssm-$NssmVersion.zip" -OutFile "$DownloadDirectory/nssm.zip"
-        Expand-Archive "$DownloadDirectory/nssm.zip" -DestinationPath "$DownloadDirectory/"
-
-        Move-Item -Path "$DownloadDirectory/nssm-$NssmVersion/win64/nssm.exe" -Destination "$InstallationDirectory/bin/nssm.exe" -Force
-
-        Remove-Item -Path $DownloadDirectory -Recurse
-    } -ArgumentList $DownloadDirectory, $InstallationDirectory, $NssmVersion
-
-    #Install-PackageProvider ChocolateyGet -Force
-    #Install-Package nssm -ProviderName ChocolateyGet -Force
-}
-
-function New-KubernetesConfigurations {
-    param (
-        [parameter(Mandatory = $true)] $DestinationBaseDir,
-        [parameter(Mandatory = $true)] $KopsStateStoreBucket,
-        [parameter(Mandatory = $true)] $KopsStateStorePrefix,
-        [parameter(Mandatory = $true)] $KubernetesMasterInternalName,
-        [parameter(Mandatory = $false)] [string[]] $KubernetesUsers
-    )
-
-    # Download the issued certificate authority keyset.
-    New-Item $DestinationBaseDir/issued/ca -ItemType Directory -ErrorAction SilentlyContinue
-    $S3ObjectKey = "$KopsStateStorePrefix/pki/issued/ca/keyset.yaml"
-    $LocalCertificateAuthorityFile = "$DestinationBaseDir/ca-keyset.yaml"
-    Read-S3Object -BucketName $KopsStateStoreBucket -Key $S3ObjectKey -File $LocalCertificateAuthorityFile
-
-    # Load the certificate authority data.
-    $CertificateAuthorityData = ((Get-Content $LocalCertificateAuthorityFile) | ConvertFrom-Yaml)
-    $CertificateAuthorityCertificate = [System.Convert]::FromBase64String($CertificateAuthorityData.publicMaterial)
-    Set-Content -Path $DestinationBaseDir/issued/ca.crt -Value $CertificateAuthorityCertificate -Encoding Byte
-    foreach ($KubernetesUser in $KubernetesUsers) {
-        Write-Host "generating kubeconfig for $KubernetesUser"
-
-        # Download each user's secrets.
-        New-Item $DestinationBaseDir/private/$KubernetesUser -ItemType Directory -ErrorAction SilentlyContinue
-        $S3ObjectKey = "$KopsStateStorePrefix/pki/private/$KubernetesUser/keyset.yaml"
-        $LocalUserFile = "$DestinationBaseDir/$KubernetesUser-keyset.yaml"
-        Read-S3Object -BucketName $KopsStateStoreBucket -Key $S3ObjectKey -File $LocalUserFile
-
-        # Load the user's secrets.
-        $KuberenetesUserData = ((Get-Content $LocalUserFile) | ConvertFrom-Yaml)
-
-        # Generate the Kubernetes configuration file for each user.
-        $KubernetesConfigData = @{
-            "apiVersion"      = "v1";
-            "clusters"        = @(
-                @{
-                    "cluster" = @{
-                        "certificate-authority-data" = $CertificateAuthorityData.publicMaterial;
-                        "server"                     = "https://$KubernetesMasterInternalName";
-                    };
-                    "name"    = "local";
-                }
-            );
-            "contexts"        = @(
-                @{
-                    "context" = @{
-                        "cluster" = "local";
-                        "user"    = "$KubernetesUser";
-                    };
-                    "name"    = "service-account-context";
-                }
-            )
-            "current-context" = "service-account-context";
-            "kind"            = "Config";
-            "users"           = @(
-                @{
-                    "name" = "$KubernetesUser";
-                    "user" = @{
-                        "client-certificate-data" = $KuberenetesUserData.publicMaterial;
-                        "client-key-data"         = $KuberenetesUserData.privateMaterial;
-                    };
-                }
-            );
-        }
-    
-        ConvertTo-Yaml $KubernetesConfigData | Set-Content -Path "$DestinationBaseDir/$KubernetesUser.kcfg"
-        Remove-Item -Path $LocalUserFile -Force
-    }
-    Remove-Item -Path $LocalCertificateAuthorityFile -Force
-}
-
-########################################################################################################################
-# Helper Functions
-########################################################################################################################
-function Get-NodeKeysetFromTags {
-    param(
-        [parameter(Mandatory = $true)] $Prefix,
-        [parameter(Mandatory = $false)] $Tags = $script:Ec2Tags
-    )
-
-    $tags = $script:Ec2Tags
-    $tags = $Tags | Where-Object { $_.Key -like "$Prefix/*" } | ForEach-Object {
-        return $_.Key.replace("$Prefix/", "") + "=" + $_.Value
-    }
-    return $tags
-}
-
-function Get-NodeLabelsFromTags {
-    param(
-        [parameter(Mandatory = $false)] $Prefix = "k8s.io/cluster-autoscaler/node-template/label",
-        [parameter(Mandatory = $false)] $Tags = $script:Ec2Tags
-    )
-    return (Get-NodeKeysetFromTags -Prefix $Prefix -Tags $Tags)
-}
-
-function Get-NodeTaintsFromTags {
-    param(
-        [parameter(Mandatory = $false)] $Prefix = "k8s.io/cluster-autoscaler/node-template/taint",
-        [parameter(Mandatory = $false)] $Tags = $script:Ec2Tags
-    )
-    return (Get-NodeKeysetFromTags -Prefix $Prefix -Tags $Tags)
-}
-
-function Update-NetConfigurationFile {
-    param(
-        [parameter(Mandatory = $false)] $NetworkName = "vxlan0",
-        [parameter(Mandatory = $false)] $NetworkMode = "vxlan",
-        [parameter(Mandatory = $false)] $KubeClusterCidr = $env:KubeClusterCidr
-    )
-
-    $NetConfigurationFile = "c:/etc/kube-flannel/net-conf.json"
-
-    $Configuration = @{
-        "Network" = "$KubeClusterCidr"
-        "Backend" = @{
-            "name" = "$NetworkName"
-            "type" = "$NetworkMode"
+# ---- Helper Functions ---- #
+function DownloadFile([string]$Url, [string]$Destination)
+{
+    $secureProtocols = @()
+    $insecureProtocols = @([System.Net.SecurityProtocolType]::SystemDefault, [System.Net.SecurityProtocolType]::Ssl3)
+    foreach ($protocol in [System.Enum]::GetValues([System.Net.SecurityProtocolType]))
+    {
+        if ($insecureProtocols -notcontains $protocol)
+        {
+            $secureProtocols += $protocol
         }
     }
+    [System.Net.ServicePointManager]::SecurityProtocol = $secureProtocols
 
-    if (Test-Path $NetConfigurationFile) {
-        Clear-Content -Path $NetConfigurationFile
+    try
+    {
+        (New-Object System.Net.WebClient).DownloadFile($Url, $Destination)
     }
-
-    Write-Host "Generated net-conf.json Config [$Configuration]"
-    Add-Content -Path $NetConfigurationFile -Value (ConvertTo-Json $Configuration)
+    catch
+    {
+        Write-Error "ERROR: Failed to download $Url"
+        throw $_
+    }
 }
 
-function Update-CniConfigurationFile {
-    param(
-        [parameter(Mandatory = $false)] $KubernetesDirectory = $script:KubernetesDirectory,
-        [parameter(Mandatory = $false)] $NetworkName = "vxlan0",
-        [parameter(Mandatory = $false)] $KubeDnsSuffix = "svc.cluster.local",
-        [parameter(Mandatory = $false)] $KubeClusterCidr = $env:KubeClusterCidr,
-        [parameter(Mandatory = $false)] $KubeServiceCidr = $env:KubeServiceCidr,
-        [parameter(Mandatory = $false)] $KubeClusterDns = $env:KubeClusterDns
-    )
+function DownloadKopsConfigStoreFile([string]$KopsConfigBase, [string]$KopsFile , [string]$Destination)
+{
+    $s3Bucket = $kopsConfigBase.Split('/')[-2]
+    $s3Item = "$($kopsConfigBase.Split('/')[-1])/$KopsFile"
+    try
+    {
+        Read-S3Object -BucketName $s3Bucket -Key $s3Item -File $Destination -Region $AWSRegion | Out-Null
+    }
+    catch
+    {
+        Write-Output "ERROR: Cannot get file $s3Item from bucket $s3Bucket"
+        throw $_
+    }
+}
 
-    New-Item -Path "$KubernetesDirectory/cni/config" -ItemType directory
-    $CniConfigurationFile = "$KubernetesDirectory/cni/config/cni.conf"
+function GetDefaultInterface()
+{
+    $interface = ( Get-NetIPConfiguration | Where-Object -FilterScript { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -ne "Disconnected" })
 
-    $Configuration = @{
+    if ((-not $interface) -or ($interface.Count -ne 1))
+    {
+        throw 'Cannot get default interface..! Exiting...'
+    }
+    return $interface
+}
+
+function NewKubeConfigFromKopsState([string]$KopsConfigBase, [string]$KubeUser, [string]$KubeApi, [string]$KubeCAPublicData, [string]$Destination)
+{
+    DownloadKopsConfigStoreFile -KopsConfigBase $KopsConfigBase -KopsFile "pki/private/$KubeUser/keyset.yaml" -Destination "$env:TEMP\kops\$KubeUser-keyset.yaml"
+    $kubeKeysetData = Get-Content -Path "$env:TEMP\kops\$KubeUser-keyset.yaml" | ConvertFrom-Yaml
+
+    $kubeConfig = @{
+        "apiVersion"      = "v1";
+        "clusters"        = @(
+            @{
+                "cluster" = @{
+                    "certificate-authority-data" = $KubeCAPublicData;
+                    "server"                     = "https://$KubeApi";
+                };
+                "name"    = "local";
+            }
+        );
+        "contexts"        = @(
+            @{
+                "context" = @{
+                    "cluster" = "local";
+                    "user"    = "$KubeUser";
+                };
+                "name"    = "service-account-context";
+            }
+        )
+        "current-context" = "service-account-context";
+        "kind"            = "Config";
+        "users"           = @(
+            @{
+                "name" = "$KubeUser";
+                "user" = @{
+                    "client-certificate-data" = $kubeKeysetData.publicMaterial;
+                    "client-key-data"         = $kubeKeysetData.privateMaterial;
+                };
+            }
+        );
+    }
+
+    ConvertTo-Yaml $kubeConfig | Set-Content -Path $Destination
+}
+
+function GetTokenForServiceAccount([string]$KubeCtlPath, [string]$KubeConfig, [string]$Namespace, [string]$ServiceAccount)
+{
+    $kubeSecrets = ( & $KubeCtlPath get secrets --kubeconfig=`"$KubeConfig`" --namespace $Namespace -ojson | ConvertFrom-Json )
+    if ($LASTEXITCODE -ne 0)
+    {
+        Write-Output 'ERROR: Running kubectl'
+        throw 'Error running kubectl'
+    }
+
+    $kubeSecret = $kubeSecrets.items | Where-Object -FilterScript { $_.metadata.annotations.'kubernetes.io/service-account.name' -eq $ServiceAccount }
+    if (-not $kubeSecret.data.token)
+    {
+        Write-Output "ERROR: Cant find token for service account $ServiceAccount in namespace $Namespace"
+        throw "Cant find token for service account $ServiceAccount in namespace $Namespace"
+    }
+
+    return $kubeSecret.data.token
+}
+
+function NewKubeConfigFromToken([string]$KubeUser, [string]$KubeUserToken, [string]$KubeApi, [string]$KubeCAPublicData, [string]$Destination)
+{
+    $kubeConfig = @{
+        "apiVersion"      = "v1";
+        "clusters"        = @(
+            @{
+                "cluster" = @{
+                    "certificate-authority-data" = $KubeCAPublicData;
+                    "server"                     = "https://$KubeApi";
+                };
+                "name"    = "local";
+            }
+        );
+        "contexts"        = @(
+            @{
+                "context" = @{
+                    "cluster" = "local";
+                    "user"    = "$KubeUser";
+                };
+                "name"    = "service-account-context";
+            }
+        )
+        "current-context" = "service-account-context";
+        "kind"            = "Config";
+        "users"           = @(
+            @{
+                "name" = "$KubeUser";
+                "user" = @{
+                    "token" = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($KubeUserToken)); ;
+                };
+            }
+        );
+    }
+
+    ConvertTo-Yaml $kubeConfig | Set-Content -Path $Destination
+}
+
+function UpdateCNIConfig([string]$KubeClusterCIDR, [string]$KubeDnsServiceIP, [string]$KubeServiceCIDR, [string]$Destination)
+{
+    $configuration = @{
         "cniVersion" = "0.2.0"
-        "name"       = "$NetworkName"
+        "name"       = "vxlan0"
         "type"       = "flannel"
         "delegate"   = @{
             "type"     = "win-overlay"
             "dns"      = @{
                 "Nameservers" = @(
-                    "$KubeClusterDns"
+                    "$KubeDnsServiceIP"
                 )
                 "Search"      = @(
-                    "$KubeDnsSuffix"
+                    "cluster.local"
                 )
             }
             "policies" = @(
@@ -320,8 +180,8 @@ function Update-CniConfigurationFile {
                     "Value" = @{
                         "Type"          = "OutBoundNAT"
                         "ExceptionList" = @(
-                            $KubeClusterCidr,
-                            $KubeServiceCidr
+                            $KubeClusterCIDR,
+                            $KubeServiceCIDR
                         )
                     }
                 },
@@ -336,45 +196,78 @@ function Update-CniConfigurationFile {
             )
         }
     }
-
-    if (Test-Path $CniConfigurationFile) {
-        Clear-Content -Path $CniConfigurationFile
-    }
-
-    Write-Host "Generated CNI Config [$Configuration]"
-    Add-Content -Path $CniConfigurationFile -Value (ConvertTo-Json $Configuration -Depth 20)
+    Set-Content -Path $Destination -Value (ConvertTo-Json $Configuration -Depth 20)
 }
 
-function Get-SourceVip {
-    param(
-        [parameter(Mandatory = $true)] $IpAddress,
-        [parameter(Mandatory = $false)] $NetworkName = "vxlan0",
-        [parameter(Mandatory = $false)] $KubernetesDirectory = $script:KubernetesDirectory
-    )
-
-    $hnsNetwork = Get-HnsNetwork | ? Name -eq $NetworkName.ToLower()
-    $subnet = $hnsNetwork.Subnets[0].AddressPrefix
-
-    $IpamConfig = @{
-        "cniVersion" = "0.2.0"
-        "name"       = "$NetworkName"
-        "ipam"       = @{
-            "type"   = "host-local"
-            "ranges" = @(,
-                @(,
-                    @{"subnet" = "$subnet" }
-                )
-            )
+function UpdateNetConfiguration([string]$KubeClusterCIDR, [string]$Destination)
+{
+    $configuration = @{
+        "Network" = "$KubeClusterCIDR"
+        "Backend" = @{
+            "name" = "vxlan0"
+            "type" = "vxlan"
         }
     }
+    Set-Content -Path $Destination -Value (ConvertTo-Json $Configuration -Depth 20)
+}
 
-    $env:CNI_COMMAND = "ADD"
-    $env:CNI_CONTAINERID = "dummy"
-    $env:CNI_NETNS = "dummy"
-    $env:CNI_IFNAME = "dummy"
-    $env:CNI_PATH = "$KubernetesDirectory/cni" #path to host-local.exe
+function InstallNSSMService([string]$NSSMPath, [string]$Name, [string]$Path, [string]$LogPath, [string]$DependsOn, [string]$EnvironmentVars, [string]$Arguments)
+{
+    $commands = @(
+        "install $Name $Path",
+        "set $Name AppStderr $LogPath",
+        "set $Name DependOnService $DependsOn",
+        "set $Name AppEnvironmentExtra $EnvironmentVars",
+        "set $Name AppParameters $Arguments"
+    )
 
-    $SourceVip = ($IpamConfig | ConvertTo-Json -Depth 20 | host-local.exe | ConvertFrom-Json).ip4.ip.Split("/")[0]
+    foreach ($command in $commands)
+    {
+        Invoke-Expression -Command "& $NSSMPath\nssm.exe $command" | Out-Null
+        if ($LASTEXITCODE -ne 0)
+        {
+            Write-Output "ERROR: Installing service $Name"
+            throw "ERROR: Installing service $Name"
+        }
+    }
+}
+
+function WaitForNetwork([string]$NetworkName, [int]$waitTimeSeconds = 60)
+{
+    $startTime = Get-Date
+
+    # Wait till the network is available
+    while ($true)
+    {
+        $timeElapsed = $(Get-Date) - $startTime
+        if ($($timeElapsed).TotalSeconds -ge $waitTimeSeconds)
+        {
+            throw "Fail to create the network[($NetworkName)] in $waitTimeSeconds seconds"
+        }
+        if (Get-HnsNetwork | Where-Object  -FilterScript { $_.Name -eq $NetworkName.ToLower() })
+        {
+            break;
+        }
+        Write-Output "Waiting for the Network ($NetworkName) to be created by flanneld"
+        Start-Sleep 5
+    }
+}
+
+function GetSourceVip([string]$NetworkName, [string]$CniPath)
+{
+    $hnsNetwork = Get-HnsNetwork | Where-Object -FilterScript { $_.Name -EQ $NetworkName.ToLower() }
+    $subnet = $hnsNetwork.Subnets[0].AddressPrefix
+
+    $ipamConfig = @"
+        {"cniVersion": "0.2.0", "name": "$NetworkName", "ipam":{"type":"host-local","ranges":[[{"subnet":"$subnet"}]],"dataDir":"/var/lib/cni/networks"}}
+"@
+    $env:CNI_COMMAND="ADD"
+    $env:CNI_CONTAINERID="dummy"
+    $env:CNI_NETNS="dummy"
+    $env:CNI_IFNAME="dummy"
+    $env:CNI_PATH=$CniPath #path to host-local.exe
+
+    $sourceVip = ($ipamConfig |  & $CniPath\host-local.exe | ConvertFrom-Json).ip4.ip.Split("/")[0]
 
     Remove-Item env:CNI_COMMAND
     Remove-Item env:CNI_CONTAINERID
@@ -382,327 +275,354 @@ function Get-SourceVip {
     Remove-Item env:CNI_IFNAME
     Remove-Item env:CNI_PATH
 
-    return $SourceVip
+    return $sourceVip
 }
 
-function ConvertTo-AppParameters {
-    param(
-        [parameter(Mandatory = $true)] $AppParameters
+# ---- Routine Functions ---- #
+function CreateFolderStructure()
+{
+    $folders = @(
+        "$installDir",
+        "$installDir\kconfigs",
+        "$installDir\kconfigs\issued",
+        "$installDir\logs",
+        "$installDir\cni",
+        "$installDir\cni\bin",
+        "$installDir\cni\configs",
+        "$env:TEMP\kops",
+        "$env:SystemDrive\etc\kube-flannel"
     )
 
-    $parameters = @()
-    foreach ($v in $AppParameters.GetEnumerator()) {
-        $parameters += "--$($v.Name)=$($v.Value)"
+    foreach ($folder in $folders)
+    {
+        New-Item -Path $folder -ItemType Directory -Force | Out-Null
     }
-
-    return ($parameters -Join " ")
 }
 
-########################################################################################################################
-# SCRIPT START
-########################################################################################################################
-# Check to see if the node has already been prepared, if it has just exit early.
-if ($env:KOPS_NODE_STATE -eq "ready") { exit }
-
-# Disable windows defender (this should be removed in the image)
-Set-MpPreference -DisableRealtimeMonitoring $true
-
-# Pull down our instance's tags.
-$InstanceId = (wget "http://$script:AWSSelfServiceUri/meta-data/instance-id" -UseBasicParsing).Content
-$Ec2Tags = (Get-EC2Tag -Filter @{ Name = "resource-id"; Values = "$InstanceId" })
-
-# Start by obtaining information about our machine.
-$ComputerInfo = (Get-ComputerInfo)
-
-# Install a Powershell YAML module.
-Start-Job -Name "yaml-install" -ScriptBlock { Install-Module powershell-yaml -Force }
-
-# Pull a few variables from AWS' self-service URI.
-$ec2InstanceId = (Invoke-RestMethod "http://$script:AWSSelfServiceUri/meta-data/instance-id").ToString()
-$ec2AvailabilityZone = (Invoke-RestMethod "http://$script:AWSSelfServiceUri/meta-data/placement/availability-zone").ToString()
-$ec2Region = $ec2AvailabilityZone.Substring(0, $ec2AvailabilityZone.Length - 1)
-$ec2LocalHostname = (Invoke-RestMethod "http://$script:AWSSelfServiceUri/meta-data/local-hostname").ToString()
-Write-Output "Found instance ID: $ec2InstanceId"
-Write-Output "Found availability zone: $ec2AvailabilityZone"
-Write-Output "Found region: $ec2Region"
-Write-Output "Found local hostname: $ec2LocalHostname"
-
-$env:NODE_NAME = $ec2LocalHostname.Split('.')[0] + '.' + $ec2Region + '.compute.internal'
-Write-Output "Set node hostname: $env:NODE_NAME"
-
-# Extract our kops configuration base from the user-data.
-$KopsUserDataFile = "c:/userdata.txt"
-$KopsUserData = (wget "http://$script:AWSSelfServiceUri/user-data" -UseBasicParsing).Content
-$KopsUserData = [System.Text.Encoding]::ASCII.GetString($KopsUserData)
-Set-Content -Path $KopsUserDataFile -Value $KopsUserData
-$KopsConfigBase = (Get-Content $KopsUserDataFile | Select-String -Pattern $KopsConfigBaseRegex -AllMatches).Matches.Groups
-Remove-Item -Path $KopsUserDataFile
-
-# Store kops S3 backend config information from the userdata.
-$KopsStateStoreBucket = ($KopsConfigBase | ? Name -eq "bucket").Value
-$KopsStateStorePrefix = ($KopsConfigBase | ? Name -eq "prefix").Value
-
-# Prepare our filesystem.
-New-Item -ItemType directory -Path "$KubernetesDirectory/bin"
-
-# Prepare our environment path.
-$env:PATH += ";$KubernetesDirectory/bin"
-$env:PATH += ";$KubernetesDirectory/cni"
-[System.Environment]::SetEnvironmentVariable('PATH', $env:PATH, [System.EnvironmentVariableTarget]::Machine)
-
-$KopsClusterSpecificationFile = "$KubernetesDirectory/cluster.spec"
-
-# Download the cluster specification from the kops S3 backend.
-Read-S3Object `
-    -BucketName "$KopsStateStoreBucket" `
-    -Key "$KopsStateStorePrefix/cluster.spec" `
-    -File $KopsClusterSpecificationFile
-
-Get-Job -Name "yaml-install" | Wait-Job
-Import-Module powershell-yaml
-
-# Parse the YAML cluster specification file into a PowerShell object and remove the file.
-$KopsClusterSpecification = (Get-Content $KopsClusterSpecificationFile | ConvertFrom-Yaml 2>&1)
-Remove-Item -Path $KopsClusterSpecificationFile -Force
-
-# Extract all necessary configuration items regarding the cluster.
-$KubeClusterCidr = ($KopsClusterSpecification.clusterCidr | Sort-Object -Unique)
-$KubeClusterDns = ($KopsClusterSpecification.clusterDNS | Sort-Object -Unique)
-#$KubeClusterInternalApi = ($KopsClusterSpecification.masterInternalName | Sort-Object -Unique)
-$KubeDnsDomain = ($KopsClusterSpecification.clusterDnsDomain | Sort-Object -Unique)
-$KubeNonMasqueradeCidr = ($KopsClusterSpecification.nonMasqueradeCIDR | Sort-Object -Unique)
-$KubeServiceCidr = ($KopsClusterSpecification.serviceClusterIPRange | Sort-Object -Unique)
-$KubernetesVersion = ($KopsClusterSpecification.kubernetesVersion | Sort-Object -Unique)
-
-# Download Kubernetes configuration files for both the kubelet and kube-proxy users.
-New-KubernetesConfigurations `
-    -DestinationBaseDir "$KubernetesDirectory/kconfigs" `
-    -KopsStateStoreBucket $KopsStateStoreBucket `
-    -KopsStateStorePrefix $KopsStateStorePrefix `
-    -KubernetesMasterInternalName $KubeClusterInternalApi `
-    -KubernetesUsers kubelet, kube-proxy
-
-# Download the pre-made flannel ServiceAccount Kubernetes configuaration file.
-Read-S3Object `
-    -BucketName "$KopsStateStoreBucket" `
-    -Key "$KopsStateStorePrefix/serviceaccount/flannel.kcfg" `
-    -File "$KubernetesDirectory/kconfigs/flannel.kcfg"
-
-Install-AwsKubernetesFlannel -InstallationDirectory $KubernetesDirectory
-Install-AwsKubernetesNode -KubernetesVersion $KubernetesVersion -InstallationDirectory $KubernetesDirectory
-Install-DockerImages
-Install-NSSM -InstallationDirectory $KubernetesDirectory
-
-# Wait for all installation jobs to finish.
-Get-Job | Wait-Job
-
-# Save all important pieces of information to the environment.
-$env:AwsRegion = $ec2Region
-$env:KubeClusterCidr = $KubeClusterCidr
-$env:KubeClusterDns = $KubeClusterDns
-$env:KubeClusterInternalApi = $KubeClusterInternalApi
-$env:KubeDnsDomain = $KubeDnsDomain
-$env:KubeNonMasqueradeCidr = $KubeNonMasqueradeCidr
-$env:KubeServiceCidr = $KubeServiceCidr
-$env:KubeNonMasqueradeCidr = $KubeNonMasqueradeCidr
-
-# Acquire additional network information for a later stage.
-$NetworkDefaultInterface = (
-    Get-NetIPConfiguration | 
-    Where-Object {
-        $_.IPv4DefaultGateway -ne $null -and
-        $_.NetAdapter.Status -ne "Disconnected"
+function InstallPreReqs()
+{
+    Write-Output 'Checking if docker is installed'
+    if (-not (Get-Command -Name 'docker' -ErrorAction SilentlyContinue))
+    {
+        throw "Cant find Docker!!"
     }
-)
-$NetworkDefaultGateway = $NetworkDefaultInterface.IPv4DefaultGateway.NextHop
-$NetworkHostIpAddress = $NetworkDefaultInterface.IPv4Address.IPAddress
 
-# Get taints and role from the cluster specification.
-$NodeTaints = @(Get-NodeTaintsFromTags)
-$NodeLabels = @(Get-NodeLabelsFromTags)
+    Write-Output 'Checking if powershell module powershell-yam is installed'
+    if (-not (Get-Module powershell-yaml -ListAvailable))
+    {
+        Write-Output 'Module powershell-yam is not installed. Installing...'
+        Install-Module -Name powershell-yaml -Force | Out-Null
+    }
+}
 
-# Add our own labels and taints.
-$NodeLabels += @(
-    "kubernetes.io/os-version=$($ComputerInfo.WindowsVersion)",
-    "kubernetes.io/role=node",
-    "node-role.kubernetes.io/node="
-)
+function InstallBinaries()
+{
+    Write-Output 'Downloading flannel'
+    DownloadFile -Url "https://github.com/coreos/flannel/releases/download/v0.11.0/flanneld.exe" -Destination "$installDir\flanneld.exe"
 
-if ($AutoGenerateWindowsTaints) {
-    $NodeTaints += @(
-        "kubernetes.io/os=windows:NoSchedule",
-        "kubernetes.io/os-version=$($ComputerInfo.WindowsVersion):NoSchedule"
+    Write-Output 'Downloading CNI Binaries'
+    DownloadFile -Url "https://github.com/containernetworking/plugins/releases/download/v0.8.2/cni-plugins-windows-amd64-v0.8.2.tgz" -Destination "$env:Temp/kops/cni-plugins-windows-amd64-v0.8.2.tgz"
+    & cmd /c tar -zxvf $env:Temp/kops/cni-plugins-windows-amd64-v0.8.2.tgz -C $installDir/cni/bin '2>&1' | Out-Null
+    if (!$?)
+    {
+        Write-Output 'Error decompressing CNI binaries'
+        throw 'Error decompressing CNI binaries'
+    }
+
+    Write-Output 'Downloading Kubernetes Binaries'
+    DownloadFile -Url "https://dl.k8s.io/v$kubeVersion/kubernetes-node-windows-amd64.tar.gz" -Destination "$env:Temp/kops/kubernetes-node-windows-amd64.tar.gz"
+    New-Item -Path "$env:Temp/kops/kubernetes" -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+    & cmd /c tar -zxvf $env:Temp/kops/kubernetes-node-windows-amd64.tar.gz -C $env:Temp/kops/kubernetes '2>&1' | Out-Null
+    if (!$?)
+    {
+        Write-Output 'Error decompressing kubernetes binaries'
+        throw 'Error decompressing kubernetes binaries'
+    }
+    Move-Item -Path "$env:Temp/kops/kubernetes/kubernetes/node/bin/*.exe" -Destination $installDir -Force
+
+    Write-Output 'Downloading Microsoft SDN PowerShell module'
+    DownloadFile -Url "https://raw.githubusercontent.com/Microsoft/SDN/master/Kubernetes/windows/hns.psm1" -Destination "$installDir/hns.psm1"
+
+    Write-Output 'Downloading NSSM service manager'
+    DownloadFile -Url "https://nssm.cc/release/nssm-2.23.zip" -Destination "$env:Temp\kops\nssm.zip"
+    Expand-Archive "$env:Temp\kops\nssm.zip" -DestinationPath "$env:Temp\kops" -Force
+    Copy-Item "$env:Temp\kops\nssm-2.23\win64\nssm.exe" -Destination $installDir -Force
+}
+
+function PrepareNetwork()
+{
+    if (-not (Get-NetFirewallRule -Name OverlayTraffic4789UDP -ErrorAction SilentlyContinue))
+    {
+        Write-Output 'Creating firewall rule for VXLAN'
+        New-NetFirewallRule -Name OverlayTraffic4789UDP -Description "Overlay network traffic UDP" -Action Allow -LocalPort 4789 -Enabled True -DisplayName "Overlay Traffic 4789 UDP" -Protocol UDP | Out-Null
+    }
+    else
+    {
+        Write-Output 'Firewall rule for VXLAN already exists'
+    }
+
+    if (-not (Get-NetFirewallRule -Name KubeletAllow10250 -ErrorAction SilentlyContinue))
+    {
+        Write-Output 'Creating firewall rule for kubelet'
+        New-NetFirewallRule -Name KubeletAllow10250 -Description "Kubelet Allow 10250" -Action Allow -LocalPort 10250 -Enabled True -DisplayName "KubeletAllow10250" -Protocol TCP | Out-Null
+    }
+    else
+    {
+        Write-Output 'Firewall rule for kubelet already exists'
+    }
+
+    if ( -not (Get-HnsNetwork | Where-Object -FilterScript { $_.Name -eq 'External' }))
+    {
+        Write-Output 'Creating External network'
+        New-HNSNetwork -Type 'overlay' -AddressPrefix "192.168.255.0/30" -Gateway "192.168.255.1" -Name "External" -AdapterName $((GetDefaultInterface).InterfaceAlias) -SubnetPolicies @(@{Type = "VSID"; VSID = 9999; }) | Out-Null
+    }
+    else
+    {
+        Write-Output 'External network already exists... Skipping...'
+    }
+}
+
+function GetKubeletArgs()
+{
+    $args = @(
+        "$installDir\kubelet.exe",
+        '--windows-service',
+        '--v=6',
+        '--cgroups-per-qos=false',
+        '--enforce-node-allocatable=""',
+        '--pod-infra-container-image=mcr.microsoft.com/k8s/core/pause:1.2.0',
+        "--kubeconfig=$installDir\kconfigs\kubelet",
+        '--cloud-provider=aws',
+        "--hostname-override=$ec2LocalHostname",
+        "--log-dir=$installDir\logs",
+        '--logtostderr=false',
+        '--network-plugin=cni',
+        "--cni-bin-dir=$installDir\cni\bin",
+        "--cni-conf-dir=$installDir\cni\configs"
     )
+    return $args
+
+    # "$kubeletBinPath --windows-service --v=6 --log-dir=$logDir --cert-dir=$env:SYSTEMDRIVE\var\lib\kubelet\pki --cni-bin-dir=$CniDir --cni-conf-dir=$CniConf --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf --hostname-override=$(hostname) --pod-infra-container-image=$Global:PauseImage --enable-debugging-handlers  --cgroups-per-qos=false --enforce-node-allocatable=`"`" --logtostderr=false --network-plugin=cni --resolv-conf=`"`" --cluster-dns=`"$KubeDnsServiceIp`" --cluster-domain=cluster.local --feature-gates=$KubeletFeatureGates"
+    #    "--hostname-override=$ec2LocalHostname"
+    #    '--v=6'
+    #    '--pod-infra-container-image=mcr.microsoft.com/k8s/core/pause:1.2.0'
+    #    #'--resolv-conf=\"\"',
+    #    #'--allow-privileged=true',
+    #    #'--enable-debugging-handlers', # Comment for Config
+    #    "--cluster-dns=`"$KubeDnsServiceIp`"",
+    #    '--cluster-domain=cluster.local',
+    #    #'--hairpin-mode=promiscuous-bridge', # Comment for Config
+    #    '--image-pull-progress-deadline=20m'
+    #    '--cgroups-per-qos=false'
+    #    "--log-dir=$installDir/logs"
+    #    '--logtostderr=false'
+    #    "--enforce-node-allocatable=`"`""
+    #    '--network-plugin=cni'
+    #    "--cni-bin-dir=$installDir\cni\bin"
+    #    "--cni-bin-dir=$installDir\cni\configs"
+    #    "--node-ip=$NodeIp"
+    #    "--cert-dir=$env:SYSTEMDRIVE\var\lib\kubelet\pki"
+    #    "--config=$env:SYSTEMDRIVE\var\lib\kubelet\config.yaml"
+    #    "--kubeconfig=$env:SYSTEMDRIVE\etc\kubernetes\kubelet.conf"
+    #    #"--bootstrap-kubeconfig=$env:SYSTEMDRIVE\etc\kubernetes\bootstrap-kubelet.conf"
 }
 
-# Initially mark the node with NotReady taint.
-$NodeTaints += @("node.kubernetes.io/NotReady=:NoSchedule")
-
-# Join labels and taints into a single string.
-$NodeTaints = $NodeTaints -Join ""","""
-$NodeLabels = $NodeLabels -Join ""","""
-$NodeTaints = """$NodeTaints"""
-$NodeLabels = """$NodeLabels"""
-
-# Go ahead install Docker credentials for AWS.
-$env:DOCKER_CONFIG = "c:/.docker"
-New-Item -Path $env:DOCKER_CONFIG -ItemType directory
-Invoke-Expression -Command (Get-ECRLoginCommand -Region $env:AwsRegion).Command
-[System.Environment]::SetEnvironmentVariable('DOCKER_CONFIG', $env:DOCKER_CONFIG, [System.EnvironmentVariableTarget]::Machine)
-
-# Run install docker again, this time with servercore
-Install-DockerImages -WithServerCore $true
-
-########################################################################################################################
-# (3) Careful Execution of Kubernetes Executables and Networking
-########################################################################################################################
-Import-Module "$KubernetesDirectory/hns.psm1"
-
-# Get the name of the flannel overlap network.
-$FlannelConfigMap = (kubectl --kubeconfig="$KubernetesDirectory/kconfigs/flannel.kcfg" get configmaps -n kube-system kube-flannel-cfg -ojson | ConvertFrom-Json)
-$FlannelCniConfiguration = ($FlannelConfigMap.data.'cni-conf.json' | ConvertFrom-Json)
-$env:KUBE_NETWORK = $FlannelCniConfiguration.name
-
-# Create an overlay network to trigger a vSwitch creation.
-# Do this only once as it causes network blip.
-New-NetFirewallRule `
-    -Name OverlayTraffic4789UDP `
-    -Description "Overlay network traffic UDP" `
-    -Action Allow `
-    -LocalPort 4789 `
-    -Enabled True `
-    -DisplayName "Overlay Traffic 4789 UDP" `
-    -Protocol UDP `
-    -ErrorAction SilentlyContinue
-if (!(Get-HnsNetwork | ? Name -eq "External")) {
-    New-HNSNetwork `
-        -Name "External" `
-        -Type "overlay" `
-        -AddressPrefix "192.168.255.0/30" `
-        -Gateway "192.168.255.1" `
-        -SubnetPolicies @(@{ Type = "VSID"; VSID = 9999; }) `
-        -Verbose
+function GetFlannelArgs()
+{
+    $args = @(
+        '--kube-subnet-mgr=1',
+        '--ip-masq=1',
+        "--kubeconfig-file=$installDir\kconfigs\flannel",
+        "--iface=$(((GetDefaultInterface).IPv4Address).IPAddress)"
+    )
+    return $args
 }
 
-# Open up the port for shell and logs.
-New-NetFirewallRule `
-    -Name OverlayTraffic10250UDP `
-    -Description "Overlay network traffic TCP" `
-    -Action Allow `
-    -LocalPort 10250 `
-    -Enabled True `
-    -DisplayName "Overlay Traffic 10250 TCP" `
-    -Protocol TCP `
-    -ErrorAction SilentlyContinue
-
-# Readd the static route to the metadata service.
-route ADD 169.254.169.254 MASK 255.255.255.255 $NetworkDefaultGateway /p
-
-# Wait for the network to stabilize, usually takes about five to ten seconds.
-kubectl get nodes --kubeconfig="$KubernetesDirectory/kconfigs/kubelet.kcfg" 2>&1 | Out-Null
-while ($? -eq $false) {
-    Start-Sleep 1
-    # Use `kubectl get nodes` to just test the connectivity to the cluster.
-    kubectl get nodes --kubeconfig="$KubernetesDirectory/kconfigs/kubelet.kcfg" 2>&1 | Out-Null
+function GetKubeProxyArgs()
+{
+    $args = @(
+        "$installDir\kube-proxy.exe",
+        "--hostname-override=$ec2LocalHostname"
+        '--v=6'
+        '--proxy-mode=kernelspace'
+        "--kubeconfig=$installDir\kconfigs\kube-proxy",
+        '--network-name=vxlan0'
+        "--cluster-cidr=$kubeClusterCidr"
+        "--log-dir=$installDir\logs",
+        '--logtostderr=false'
+        '--windows-service',
+        '--feature-gates="WinOverlay=true"',
+        "--source-vip=$sourceVip"
+    )
+    return $args
 }
 
-########################################################################################################################
+function CleanNode()
+{
+    if (Get-Service -Name 'kube-proxy' -ErrorAction SilentlyContinue)
+    {
+        Write-Output 'Stopping and removing kube-proxy service'
+        Stop-Service -Name 'kube-proxy' -Force
+        $service = Get-WmiObject -Class Win32_Service -Filter "Name='kube-proxy'"
+        $service.delete() | Out-Null
+    }
 
-Update-NetConfigurationFile
-Update-CniConfigurationFile
+    if (Get-Service -Name 'kubelet' -ErrorAction SilentlyContinue)
+    {
+        Write-Output 'Stopping and removing kubelet service'
+        Stop-Service -Name 'kubelet' -Force
+        $service = Get-WmiObject -Class Win32_Service -Filter "Name='kubelet'"
+        $service.delete() | Out-Null
+    }
 
-$Services = @("flanneld", "kubelet", "kube-proxy")
-foreach ($Service in $Services) {
-    # Install our base services.
-    nssm install $Service "$KubernetesDirectory/bin/$Service"
+    if (Get-Service -Name 'flanneld' -ErrorAction SilentlyContinue)
+    {
+        Write-Output 'Stopping and removing flanneld service'
+        Stop-Service -Name 'flanneld' -Force
+        $service = Get-WmiObject -Class Win32_Service -Filter "Name='flanneld'"
+        $service.delete() | Out-Null
+    }
 
-    # Setup logging for each service.
-    nssm set $Service AppStderr (Join-Path -Path "c:/" -ChildPath "$Service.log")
+    $folders = @(
+        "$env:TEMP\kops",
+        "$installDir",
+        "$env:SystemDrive\etc",
+        "$env:SystemDrive\run",
+        "$env:SystemDrive\usr",
+        "$env:SystemDrive\var"
+    )
+    foreach ($folder in $folders)
+    {
+        if (Test-Path -Path $folder)
+        {
+            Remove-Item -Path $folder -Recurse -Force
+        }
+    }
 }
 
-# Set service dependencies.
-nssm set kube-proxy DependOnService kubelet flanneld
+# *****************************  Main **************************** #
+Write-Output 'Starting Node ....'
 
-# Determine environment for the services.
-nssm set flanneld AppEnvironmentExtra NODE_NAME=$env:NODE_NAME
-nssm set kube-proxy AppEnvironmentExtra KUBE_NETWORK=$env:KUBE_NETWORK
+#region init
+Write-Output '------  Init ------'
 
-# Determine our base arguments for the services.
-$KubeletArguments = @{
-    "anonymous-auth"               = "false";
-    "authorization-mode"           = "Webhook";
-    "cgroups-per-qos"              = "false";
-    "client-ca-file"               = "$KubernetesDirectory/kconfigs/issued/ca.crt";
-    "cloud-provider"               = "aws";
-    "cluster-dns"                  = "$env:KubeClusterDns";
-    "cluster-domain"               = "$env:KubeDnsDomain";
-    "cni-bin-dir"                  = "$KubernetesDirectory/cni";
-    "cni-conf-dir"                 = "$KubernetesDirectory/cni/config";
-    "enable-debugging-handlers"    = "true";
-    "enforce-node-allocatable"     = "";
-    "feature-gates"                = """WinOverlay=true""";
-    "hairpin-mode"                 = "promiscuous-bridge";
-    "hostname-override"            = "$env:NODE_NAME";
-    "image-pull-progress-deadline" = "20m";
-    "kubeconfig"                   = "$KubernetesDirectory/kconfigs/kubelet.kcfg";
-    "network-plugin"               = "cni";
-    "node-ip"                      = "$NetworkHostIpAddress";
-    "non-masquerade-cidr"          = "$env:KubeNonMasqueradeCidr";
-    "pod-infra-container-image"    = "kubeletwin/pause";
-    "register-schedulable"         = "true";
-    "register-with-taints"         = "$NodeTaints";
-    "resolv-conf"                  = "";
-    "v"                            = "6"
+Write-Output 'Cleaning node services, files and folder'
+CleanNode
+
+Write-Output 'Creating folder structure'
+CreateFolderStructure
+
+Write-Output 'Checking and installing pre-reqs'
+InstallPreReqs
+
+Import-Module -Name powershell-yaml
+#endregion init
+
+#region get ec2 config
+Write-Output '------  Retrieving EC2 information from metadata service ------'
+$ec2MetadataUri = 'http://169.254.169.254/latest'
+try
+{
+    $ec2InstanceId = (Invoke-RestMethod "$ec2MetadataUri/meta-data/instance-id").ToString()
+    $ec2AvailabilityZone = (Invoke-RestMethod "$ec2MetadataUri/meta-data/placement/availability-zone").ToString()
+    $ec2Region = $ec2AvailabilityZone.Substring(0, $ec2AvailabilityZone.Length - 1)
+    $ec2LocalHostname = (Invoke-RestMethod "$ec2MetadataUri/meta-data/local-hostname").ToString()
+    $ec2UserData = (Invoke-RestMethod "$ec2MetadataUri/user-data").ToString()
+}
+catch
+{
+    Write-Output 'ERROR: Retrieving ec2 instance metadata'
+    throw $_
 }
 
-$FlannelArguments = @{
-    "iface"           = "$NetworkHostIpAddress";
-    "ip-masq"         = "1";
-    "kubeconfig-file" = "$KubernetesDirectory/kconfigs/flannel.kcfg";
-    "kube-subnet-mgr" = "1"
+Write-Output "EC2 Instance ID: $ec2InstanceId"
+Write-Output "EC2 Availability Zone: $ec2AvailabilityZone"
+Write-Output "EC2 Region: $ec2Region"
+Write-Output "EC2 Local Hostname: $ec2LocalHostname"
+#endregion
+
+#region get kube config
+Write-Output '------  Getting kube cluster information from KOPS S3 config store ------'
+$kopsConfigBaseMatches = $ec2UserData.Split([Environment]::NewLine) | ForEach-Object -Process { Select-String -InputObject $_ -Pattern "^ConfigBase: s3://(?<bucket>[^/]+)/(?<prefix>.+)$" }
+$kopsConfigBase = 's3://' + $kopsConfigBaseMatches.Matches.Groups[1] + '/' + $kopsConfigBaseMatches.Matches.Groups[2]
+Write-Output "KOPS ConfigBase: $kopsConfigBase"
+Write-Output "Downloading cluster.spec file"
+DownloadKopsConfigStoreFile -KopsConfigBase $kopsConfigBase -KopsFile 'cluster.spec' -Destination "$env:TEMP\kops\cluster.spec"
+$kopsClusterSpec = Get-Content -Path "$env:TEMP\kops\cluster.spec" | ConvertFrom-Yaml -ErrorAction SilentlyContinue
+
+$kubeClusterCidr = $kopsClusterSpec.clusterCidr | Sort-Object -Unique
+$kubeClusterDns = $kopsClusterSpec.clusterDNS | Sort-Object -Unique
+$kubeClusterInternalApi = $kopsClusterSpec.masterInternalName | Sort-Object -Unique
+$kubeDnsDomain = $kopsClusterSpec.clusterDnsDomain | Sort-Object -Unique
+$kubeNonMasqueradeCidr = $kopsClusterSpec.nonMasqueradeCIDR | Sort-Object -Unique
+$kubeServiceCidr = $kopsClusterSpec.serviceClusterIPRange | Sort-Object -Unique
+$kubeVersion = $kopsClusterSpec.kubernetesVersion | Sort-Object -Unique
+
+Write-Output "KUBE Cluster Cidr: $kubeClusterCidr"
+Write-Output "KUBE DNS Server: $kubeClusterDns"
+Write-Output "KUBE API: $kubeClusterInternalApi"
+Write-Output "KUBE Domain: $kubeDnsDomain"
+Write-Output "KUBE Non-Masquerade Cidr: $kubeNonMasqueradeCidr"
+Write-Output "KUBE Service Cidr: $kubeServiceCidr"
+Write-Output "KUBE Version: $kubeVersion"
+#endregion
+
+#region install binaries
+Write-Output '------  Install Binaries ------'
+Write-Output "Installing kubernetes binaries for version: $kubeVersion"
+InstallBinaries
+Import-Module $installDir\hns.psm1 -WarningAction SilentlyContinue
+#endregion
+
+#region generate kube config files
+Write-Output '------  Generating kube config files ------'
+Write-Output 'Getting certificate authority certificate'
+DownloadKopsConfigStoreFile -KopsConfigBase $kopsConfigBase -KopsFile 'pki/issued/ca/keyset.yaml' -Destination "$env:TEMP\kops\ca-keyset.yaml"
+$kubeCAPublicData = (Get-Content -Path "$env:TEMP\kops\ca-keyset.yaml" | ConvertFrom-Yaml).publicMaterial
+try
+{
+    $caCertData = [System.Convert]::FromBase64String($kubeCAPublicData)
 }
-
-$KubeProxyArguments = @{
-    "v"                 = "4";
-    "cluster-cidr"      = "$env:KubeClusterCidr";
-    "enable-dsr"        = "false";
-    "feature-gates"     = """WinOverlay=true""";
-    "hostname-override" = "$env:NODE_NAME";
-    "kubeconfig"        = "$KubernetesDirectory/kconfigs/kube-proxy.kcfg";
-    "network-name"      = "$env:KUBE_NETWORK";
-    "proxy-mode"        = "kernelspace";
-    "source-vip"        = "$null"
+catch
+{
+    Write-Output 'ERROR: Converting CA keyset to CA certificate'
+    throw $_
 }
-nssm set kubelet AppParameters (ConvertTo-AppParameters -AppParameters $KubeletArguments)
-nssm set flanneld AppParameters (ConvertTo-AppParameters -AppParameters $FlannelArguments)
-nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+Set-Content -Path "$installDir/kconfigs/issued/ca.crt" -Value $caCertData -Encoding Byte
 
-# Start kubelet so that we register the node, but it won't be schedulable yet.
-nssm start kubelet
+Write-Output 'Generating kubeconfig for kubelet'
+NewKubeConfigFromKopsState -KopsConfigBase $kopsConfigBase -KubeUser 'kubelet' -KubeApi $kubeClusterInternalApi -KubeCAPublicData $kubeCAPublicData -Destination "$installDir/kconfigs/kubelet"
 
-# Start flannel so we can get the source VIP needed for kube-proxy.
-nssm start flanneld
+Write-Output 'Generating kubeconfig for kube-proxy'
+NewKubeConfigFromKopsState -KopsConfigBase $kopsConfigBase -KubeUser 'kube-proxy' -KubeApi $kubeClusterInternalApi -KubeCAPublicData $kubeCAPublicData -Destination "$installDir/kconfigs/kube-proxy"
 
-# We need to wait for a few seconds for flannel to start before we can get our source VIP.
-# Ideally we'd have a way to check without having to poll, but as far as I can tell there's no way to tell if flannel
-# is ready, aside from maybe parsing logs so this'll have to do.
-Start-Sleep 5
-while ($SourceVip -eq $null) {
-    Write-Host "attempting to get source-VIP"
-    $SourceVip = Get-SourceVip -IpAddress $NetworkHostIpAddress -KubernetesDirectory $KubernetesDirectory
-    Start-Sleep 1
-}
-Write-Host "obtained source-VIP"
+Write-Output 'Generating kubeconfig for flannel'
+NewKubeConfigFromToken -KubeUser 'flannel' -KubeUserToken $(GetTokenForServiceAccount -KubeCtlPath "$installDir\kubectl.exe" -KubeConfig "$installDir\kconfigs\kubelet" -Namespace 'kube-system' -ServiceAccount 'flannel') -KubeApi $kubeClusterInternalApi -KubeCAPublicData $kubeCAPublicData -Destination "$installDir/kconfigs/flannel"
+#endregion
 
-$KubeProxyArguments.'source-vip' = "$SourceVip"
-nssm set kube-proxy AppParameters (ConvertTo-AppParameters -AppParameters $KubeProxyArguments)
+Write-Output '------  Configuring Network ------'
+Write-Output 'Preparing HNS network and configure firewall rules'
+PrepareNetwork
+Write-Output 'Generating a new cni.conf file for kubelet'
+UpdateCNIConfig -KubeClusterCIDR $kubeClusterCidr -KubeDnsServiceIP $kubeClusterDns -KubeServiceCIDR $kubeServiceCidr -Destination "$installDir\cni\configs\cni.conf"
+Write-Output 'Generating a new net-conf.json file for flannel'
+UpdateNetConfiguration -KubeClusterCIDR $kubeClusterCidr -Destination "$env:SystemDrive\etc\kube-flannel\net-conf.json"
 
-# Clear the HNS policy list before starting kube-proxy.
-Get-HnsPolicyList | Remove-HnsPolicyList
-nssm start kube-proxy
+Write-Output '------  Start Kubelet and Flannel ------'
+Write-Output 'Installing and starting the kubelet service'
+New-Service -Name 'kubelet' -StartupType Automatic -DependsOn "docker" -BinaryPathName $($(GetKubeletArgs) -join ' ') | Start-Service
+Write-Output 'Installing and starting the flanneld service'
+InstallNSSMService -NSSMPath $installDir -Name 'flanneld' -Path "$installDir\flanneld.exe" -LogPath "$installDir\Logs\flannel.log" -DependsOn 'kubelet' -EnvironmentVars "NODE_NAME=$ec2LocalHostname" -Arguments (GetFlannelArgs)
+Start-Service -Name 'flanneld'
 
-# Remove the NotReady taint so that pods can be scheduled.
-kubectl --kubeconfig="$KubernetesDirectory/kconfigs/kubelet.kcfg" taint nodes $env:NODE_NAME "node.kubernetes.io/NotReady-"
+Write-Output '------  Checking network ------'
+Write-Output 'Check if network was already created by flannel'
+WaitForNetwork -NetworkName 'vxlan0' -WaitTimeSeconds 60
+Write-Output 'Getting source vip'
+$sourceVip = GetSourceVip -NetworkName 'vxlan0' -CniPath "$installDir\cni\bin"
+Write-Output "Found source vip: $sourceVip"
 
-# Mark our machine as being fully ready.
-[System.Environment]::SetEnvironmentVariable('KOPS_NODE_STATE', "ready", [System.EnvironmentVariableTarget]::Machine)
+Write-Output '------  Start Kube-Proxy ------'
+New-Service -Name 'kube-proxy' -StartupType Automatic -BinaryPathName $($(GetKubeProxyArgs) -join ' ') | Start-Service
+
+Write-Output 'Node initialized!!!!'

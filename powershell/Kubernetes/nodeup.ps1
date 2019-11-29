@@ -431,7 +431,8 @@ function GetKubeletArgs()
         '--logtostderr=false',
         '--network-plugin=cni',
         "--cni-bin-dir=$installDir\cni\bin",
-        "--cni-conf-dir=$installDir\cni\configs"
+        "--cni-conf-dir=$installDir\cni\configs",
+        '--resolv-conf=""'
     )
     return $args
 

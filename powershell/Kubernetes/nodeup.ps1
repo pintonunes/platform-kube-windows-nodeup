@@ -432,7 +432,8 @@ function GetKubeletArgs()
         '--network-plugin=cni',
         "--cni-bin-dir=$installDir\cni\bin",
         "--cni-conf-dir=$installDir\cni\configs",
-        '--resolv-conf=""'
+        '--resolv-conf=""',
+        "--cluster-dns=$kubeClusterDns"
     )
     return $args
 

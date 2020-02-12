@@ -3,7 +3,7 @@
 # There are a few pre-requisites in order for this script to work, as well as a few "best practices", all of which
 # will be explained down.
 param(
-    [parameter(Mandatory = $false)] 
+    [parameter(Mandatory = $false)]
     [switch]$AutoGenerateWindowsTaints,
 
     [parameter(Mandatory = $true)]
@@ -38,17 +38,17 @@ function Install-DockerImages {
         $WithServerCore = $args[1]
 
         # Pull ready-made Windows containers of the given Windows version.
-        docker pull "mcr.microsoft.com/windows/nanoserver:$WindowsVersion"
+        docker pull "mcr.microsoft.com/windows/nanoserver:$WindowsVersion-KB4534273"
 
         # Tag the docker images.
-        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion" windows/nanoserver:latest
-        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion" microsoft/nanoserver:latest
+        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion-KB4534273" windows/nanoserver:latest
+        docker tag "mcr.microsoft.com/windows/nanoserver:$WindowsVersion-KB4534273" microsoft/nanoserver:latest
 
         # Build our infrastructure image.
         $BuildDir = Join-Path -Path (Get-Item Env:TEMP).Value -ChildPath "docker"
         New-Item -Path $BuildDir -ItemType directory
-        $DockerfileContents = "FROM mcr.microsoft.com/windows/nanoserver:$WindowsVersion`nCMD cmd /c ping -t localhost"
-    
+        $DockerfileContents = "FROM mcr.microsoft.com/windows/nanoserver:$WindowsVersion-KB4534273`nCMD cmd /c ping -t localhost"
+
         Set-Content -Path $BuildDir/Dockerfile -Value $DockerfileContents
         docker build -t kubeletwin/pause -f $BuildDir/Dockerfile $BuildDir
 
@@ -223,7 +223,7 @@ function New-KubernetesConfigurations {
                 }
             );
         }
-    
+
         ConvertTo-Yaml $KubernetesConfigData | Set-Content -Path "$DestinationBaseDir/$KubernetesUser.kcfg"
         Remove-Item -Path $LocalUserFile -Force
     }
@@ -508,7 +508,7 @@ $env:KubeNonMasqueradeCidr = $KubeNonMasqueradeCidr
 
 # Acquire additional network information for a later stage.
 $NetworkDefaultInterface = (
-    Get-NetIPConfiguration | 
+    Get-NetIPConfiguration |
     Where-Object {
         $_.IPv4DefaultGateway -ne $null -and
         $_.NetAdapter.Status -ne "Disconnected"

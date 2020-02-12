@@ -518,6 +518,8 @@ function CleanNode()
         $service.delete() | Out-Null
     }
 
+    # TODO: ISSUE WHERE WITH REPARSE POINTS...
+    # NEED TO STOP ALL CONTAINERS
     $folders = @(
         "$env:TEMP\kops",
         "$installDir",

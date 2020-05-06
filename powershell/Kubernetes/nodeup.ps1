@@ -11,7 +11,7 @@ param(
 )
 
 Start-Transcript -Path c:\nodeup.log -Force -Append
-Install-Module powershell-yaml -Force
+Install-Module -Name powershell-yaml -RequiredVersion 0.4.1 -Force
 
 # Define some of our constants.
 $global:progressPreference = 'silentlyContinue'
@@ -415,7 +415,7 @@ $Ec2Tags = (Get-EC2Tag -Filter @{ Name = "resource-id"; Values = "$InstanceId" }
 $ComputerInfo = (Get-ComputerInfo)
 
 # Install a Powershell YAML module.
-Start-Job -Name "yaml-install" -ScriptBlock { Install-Module powershell-yaml -Force }
+Start-Job -Name "yaml-install" -ScriptBlock { Install-Module -Name powershell-yaml -RequiredVersion 0.4.1 -Force }
 
 # Pull a few variables from AWS' self-service URI.
 $ec2InstanceId = (Invoke-RestMethod "http://$script:AWSSelfServiceUri/meta-data/instance-id").ToString()
